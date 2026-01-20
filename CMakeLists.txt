@@ -8,8 +8,36 @@ set(EXECUTABLE_OUTPUT_PATH ${PROJECT_BINARY_DIR}/bin)
 
 option(NEBULA_BUILD_TESTS "Build Nebula tests" OFF)
 
+set(NEBULA_IS_TOP_LEVEL OFF)
+if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+	set(NEBULA_IS_TOP_LEVEL ON)
+endif()
+option(NEBULA_BUILD_EXECUTABLES "Build Nebula command line executables" ${NEBULA_IS_TOP_LEVEL})
+
+set(_NEBULA_DEFAULT_ALLOW_UNSUPPORTED_COMPILER OFF)
+if(WIN32)
+	set(_NEBULA_DEFAULT_ALLOW_UNSUPPORTED_COMPILER ON)
+endif()
+option(NEBULA_CUDA_ALLOW_UNSUPPORTED_COMPILER "Pass -allow-unsupported-compiler to NVCC" ${_NEBULA_DEFAULT_ALLOW_UNSUPPORTED_COMPILER})
+option(NEBULA_CUDA_ALLOW_STL_MISMATCH "Pass -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH to NVCC" OFF)
+
 
 # Find CUDA, if available
+if(NOT CMAKE_CUDA_COMPILER)
+	# Help CMake locate nvcc when it is not on PATH (common on Windows).
+	find_package(CUDAToolkit QUIET)
+	if(CUDAToolkit_FOUND)
+		if(WIN32)
+			set(_NEBULA_NVCC "${CUDAToolkit_BIN_DIR}/nvcc.exe")
+		else()
+			set(_NEBULA_NVCC "${CUDAToolkit_BIN_DIR}/nvcc")
+		endif()
+		if(EXISTS "${_NEBULA_NVCC}")
+			set(CMAKE_CUDA_COMPILER "${_NEBULA_NVCC}" CACHE FILEPATH "CUDA compiler" FORCE)
+		endif()
+	endif()
+endif()
+
 include(CheckLanguage)
 check_language(CUDA)
 if(CMAKE_CUDA_COMPILER)
@@ -33,14 +61,23 @@ else()
 endif()
 
 
-# Find HDF5 library
-find_package(HDF5 1.8.13 REQUIRED C HL)
-include_directories(${HDF5_INCLUDE_DIRS})
-add_definitions(${HDF5_DEFINITIONS})
-list(APPEND LIBRARIES ${HDF5_LIBRARIES} ${HDF5_HL_LIBRARIES})
-if(WIN32)
-	list(APPEND LIBRARIES Shlwapi)
+add_library(nebula_hdf5 INTERFACE)
+
+# Prefer an in-tree HDF5 build (e.g. when Nebula is included via add_subdirectory).
+if(TARGET hdf5-static AND TARGET hdf5_hl-static)
+	target_link_libraries(nebula_hdf5 INTERFACE hdf5-static hdf5_hl-static)
+else()
+	# Find HDF5 library
+	find_package(HDF5 1.8.13 REQUIRED C HL)
+	target_include_directories(nebula_hdf5 INTERFACE ${HDF5_INCLUDE_DIRS})
+	target_compile_options(nebula_hdf5 INTERFACE ${HDF5_DEFINITIONS})
+	target_link_libraries(nebula_hdf5 INTERFACE ${HDF5_LIBRARIES} ${HDF5_HL_LIBRARIES})
 endif()
+if(WIN32)
+	target_link_libraries(nebula_hdf5 INTERFACE Shlwapi)
+endif()
+
+list(APPEND LIBRARIES nebula_hdf5)
 
 # Find MPI library if compiling against parallel HDF5
 if(HDF5_IS_PARALLEL)
@@ -53,14 +90,22 @@ endif()
 find_package(Threads REQUIRED)
 
 
-if(NOT CMAKE_BUILD_TYPE)
+if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
 	SET(CMAKE_BUILD_TYPE "Release" CACHE STRING
 		"Choose the type of build, options are: None Debug Release RelWithDebInfo MinSizeRel."
 		FORCE)
 endif()
 
-string(APPEND CMAKE_CUDA_FLAGS " --expt-relaxed-constexpr")
-string(APPEND CMAKE_CUDA_FLAGS " -prec-sqrt=false")
+if(USE_CUDA)
+	string(APPEND CMAKE_CUDA_FLAGS " --expt-relaxed-constexpr")
+	string(APPEND CMAKE_CUDA_FLAGS " -prec-sqrt=false")
+	if(WIN32 AND NEBULA_CUDA_ALLOW_UNSUPPORTED_COMPILER)
+		string(APPEND CMAKE_CUDA_FLAGS " -allow-unsupported-compiler")
+	endif()
+	if(WIN32 AND NEBULA_CUDA_ALLOW_STL_MISMATCH)
+		string(APPEND CMAKE_CUDA_FLAGS " -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH")
+	endif()
+endif()
 
 if(NEBULA_BUILD_TESTS)
 	enable_testing()

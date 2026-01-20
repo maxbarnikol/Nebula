@@ -66,8 +66,8 @@ int main(int argc, char **argv) {
               << material.get_property_string("cstool_version") << "\n";
   }
 
-  nbl::geometry::octree_builder::linearized_octree geometry(
-      nbl::geometry::octree_builder::octree_root(triangles));
+  nbl::geometry::octree_builder::linearized_octree geometry{
+      nbl::geometry::octree_builder::octree_root(triangles)};
 
   std::vector<particle> primaries;
   std::vector<int2> pixels;
