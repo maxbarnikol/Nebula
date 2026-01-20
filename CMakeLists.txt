@@ -6,6 +6,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(EXECUTABLE_OUTPUT_PATH ${PROJECT_BINARY_DIR}/bin)
 
+option(NEBULA_BUILD_TESTS "Build Nebula tests" OFF)
+
 
 # Find CUDA, if available
 include(CheckLanguage)
@@ -59,5 +61,15 @@ endif()
 
 string(APPEND CMAKE_CUDA_FLAGS " --expt-relaxed-constexpr")
 string(APPEND CMAKE_CUDA_FLAGS " -prec-sqrt=false")
+
+if(NEBULA_BUILD_TESTS)
+	enable_testing()
+
+	if(NOT NEBULA_TESTDATA_DIR)
+		get_filename_component(NEBULA_ROOT "${CMAKE_CURRENT_LIST_DIR}" ABSOLUTE)
+		get_filename_component(COLORCUBE_ROOT "${NEBULA_ROOT}/../.." ABSOLUTE)
+		set(NEBULA_TESTDATA_DIR "${COLORCUBE_ROOT}/testdata" CACHE PATH "Path to ColorCube testdata")
+	endif()
+endif()
 
 add_subdirectory(source)
