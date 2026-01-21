@@ -51,6 +51,7 @@ public:
 
 	// Get primary tag
 	inline PHYSICS primary_tag_t get_primary_tag(particle_index_t i) const;
+	inline PHYSICS uint32_t get_secondary_tag(particle_index_t i) const;
 
 	// Get last intersected triangle for a particle (or nullptr)
 	inline PHYSICS triangle const * get_last_triangle(particle_index_t i) const;

@@ -150,6 +150,13 @@ PHYSICS auto cpu_particle_manager<material_manager_t>::get_primary_tag(particle_
 }
 
 template<typename material_manager_t>
+PHYSICS uint32_t cpu_particle_manager<material_manager_t>::get_secondary_tag(
+	particle_index_t i) const
+{
+	return particles[i].secondary_tag;
+}
+
+template<typename material_manager_t>
 PHYSICS triangle const * cpu_particle_manager<material_manager_t>::get_last_triangle(
 	particle_index_t i) const
 {

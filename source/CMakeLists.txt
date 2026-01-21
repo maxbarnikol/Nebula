@@ -5,6 +5,7 @@ if(USE_CUDA)
 	find_package(CUDAToolkit REQUIRED)
 
 	add_library(nebula_gpu_lib STATIC gpu_simulation.cu
+		cpu_edep_simulation.cpp
 		$<TARGET_OBJECTS:io>
 		$<TARGET_OBJECTS:octree>)
 	target_include_directories(nebula_gpu_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -22,6 +23,12 @@ if(USE_CUDA)
 		target_include_directories(nebula_gpu_lib_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 		add_test(NAME nebula_gpu_lib_tests
 			COMMAND nebula_gpu_lib_tests ${NEBULA_TESTDATA_DIR})
+
+		add_executable(nebula_cpu_edep_lib_tests tests/nebula_cpu_edep_lib_tests.cpp)
+		target_link_libraries(nebula_cpu_edep_lib_tests nebula_gpu_lib ${LIBRARIES})
+		target_include_directories(nebula_cpu_edep_lib_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+		add_test(NAME nebula_cpu_edep_lib_tests
+			COMMAND nebula_cpu_edep_lib_tests ${NEBULA_TESTDATA_DIR})
 	endif()
 endif()
 
