@@ -87,6 +87,7 @@ int main(int argc, char **argv) {
   settings.emit_primary_spawn_events = true;
   settings.emit_secondary_spawn_events = true;
   settings.emit_energy_deposit_events = true;
+  settings.emit_interface_events = true;
 
   nbl::cpu_edep::simulation_stats stats{};
   nbl::cpu_edep::simulation_progress progress{};
@@ -109,6 +110,16 @@ int main(int argc, char **argv) {
     return 1;
   }
   if (!Expect(stats.energy_deposit_events > 0, "Energy deposit events exist")) {
+    return 1;
+  }
+  const auto interfaceCount =
+      std::count_if(events.begin(), events.end(),
+                    [](const nbl::cpu_edep::interaction_event &e) {
+                      return e.kind == static_cast<std::uint8_t>(
+                                           nbl::cpu_edep::interaction_kind::
+                                               interface_crossing);
+                    });
+  if (!Expect(interfaceCount > 0, "Interface crossing events exist")) {
     return 1;
   }
   if (!Expect(progress.progress.load(std::memory_order_relaxed) >= 1.0,

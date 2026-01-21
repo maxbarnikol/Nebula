@@ -23,6 +23,7 @@ enum class interaction_kind : std::uint8_t {
   primary_spawn = 0,
   secondary_spawn = 1,
   energy_deposit = 2,
+  interface_crossing = 3,
 };
 
 struct interaction_event {
@@ -63,6 +64,7 @@ struct simulation_settings {
   bool emit_primary_spawn_events = true;
   bool emit_secondary_spawn_events = true;
   bool emit_energy_deposit_events = true;
+  bool emit_interface_events = false;
 };
 
 struct simulation_stats {

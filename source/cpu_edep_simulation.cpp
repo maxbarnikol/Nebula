@@ -26,6 +26,7 @@ public:
 
   template <typename emit_fn>
   void simulate_to_end(const std::vector<int2> &pixels,
+                       bool emit_interface_events,
                        bool emit_secondary_spawn_events,
                        bool emit_energy_deposit_events, emit_fn &&emit) {
     for (particle_index_t particle_idx = 0;
@@ -42,7 +43,31 @@ public:
         const bool track = this->_particles.next_scatter(particle_idx);
         const std::uint8_t scatter_type =
             track ? this->_particles.get_next_scatter(particle_idx) : 0;
+        const bool intersect_event = this->_particles.next_intersect(particle_idx);
         const particle before = this->_particles[particle_idx];
+
+        if (emit_interface_events && intersect_event) {
+          const int2 pix = pixels[primary_tag];
+          interaction_event ev{};
+          ev.x = static_cast<float>(before.pos.x);
+          ev.y = static_cast<float>(before.pos.y);
+          ev.z = static_cast<float>(before.pos.z);
+          ev.dx = static_cast<float>(before.dir.x);
+          ev.dy = static_cast<float>(before.dir.y);
+          ev.dz = static_cast<float>(before.dir.z);
+          ev.energy_before_ev = static_cast<float>(before.kin_energy);
+          ev.energy_after_ev = ev.energy_before_ev;
+          ev.delta_energy_ev = 0.0f;
+          ev.primary_tag = static_cast<std::uint32_t>(primary_tag);
+          ev.electron_tag = static_cast<std::uint32_t>(electron_tag);
+          ev.parent_electron_tag = kInvalidElectronTag;
+          ev.kind =
+              static_cast<std::uint8_t>(interaction_kind::interface_crossing);
+          ev.scatter_type = 0;
+          ev.px = pix.x;
+          ev.py = pix.y;
+          emit(ev);
+        }
 
         this->intersect(particle_idx);
         this->scatter(particle_idx);
@@ -258,7 +283,8 @@ bool run_simulation_streaming(
       }
     }
 
-    driver.simulate_to_end(pixels, settings.emit_secondary_spawn_events,
+    driver.simulate_to_end(pixels, settings.emit_interface_events,
+                           settings.emit_secondary_spawn_events,
                            settings.emit_energy_deposit_events, emit);
 
     driver.flush_detected([](particle const &, std::uint32_t) {});
