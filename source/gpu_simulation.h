@@ -2,6 +2,7 @@
 #define __GPU_SIMULATION_H_
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -55,6 +56,24 @@ struct simulation_progress {
   std::atomic<uint64_t> primaries_remaining{0};
   std::atomic<uint32_t> running_particles{0};
 };
+
+using detected_callback_t =
+    void (*)(const detected_electron *electrons, std::size_t count, void *user);
+
+// Runs the GPU simulation and reports detected electrons via callback.
+// The callback is invoked periodically (from the calling thread) with batches of
+// detected electrons accumulated since the last callback.
+// The primaries and pixels arrays are modified in-place when sort_primaries or
+// prescan shuffling are enabled.
+bool run_simulation_streaming(const std::vector<triangle> &triangles,
+                              const cpu_material_manager<cpu_material_t> &materials,
+                              std::vector<particle> &primaries,
+                              std::vector<int2> &pixels,
+                              const simulation_settings &settings,
+                              detected_callback_t on_detected, void *user,
+                              simulation_stats *out_stats,
+                              std::string &out_error,
+                              simulation_progress *progress = nullptr);
 
 // Runs the GPU simulation. The primaries and pixels arrays are modified in-place
 // when sort_primaries or prescan shuffling are enabled.
