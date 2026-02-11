@@ -138,6 +138,7 @@ void ResetProgress(simulation_progress *progress) {
   progress->primaries_remaining.store(0, std::memory_order_relaxed);
   progress->running_particles.store(0, std::memory_order_relaxed);
   progress->progress.store(0.0, std::memory_order_relaxed);
+  progress->cancel_requested.store(false, std::memory_order_relaxed);
 }
 
 void FinishProgress(simulation_progress *progress) {
@@ -245,7 +246,12 @@ bool run_simulation_streaming(
     }
   };
 
+  bool cancelled = false;
   for (;;) {
+    if (progress && progress->cancel_requested.load(std::memory_order_relaxed)) {
+      cancelled = true;
+      break;
+    }
     auto work_data = pool.get_work(settings.primaries_per_batch);
     const auto count = std::get<2>(work_data);
     if (count == 0) {
@@ -309,8 +315,17 @@ bool run_simulation_streaming(
 
   geometry_t::destroy(geometry);
 
-  FinishProgress(progress);
+  if (cancelled) {
+    if (progress) {
+      progress->primaries_remaining.store(pool.get_primaries_to_go(),
+                                          std::memory_order_relaxed);
+      progress->running_particles.store(0, std::memory_order_relaxed);
+    }
+    out_error = "Simulation cancelled.";
+    return false;
+  }
 
+  FinishProgress(progress);
   return true;
 }
 

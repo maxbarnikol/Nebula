@@ -55,6 +55,7 @@ struct simulation_progress {
   std::atomic<double> progress{0.0};
   std::atomic<uint64_t> primaries_remaining{0};
   std::atomic<uint32_t> running_particles{0};
+  std::atomic<bool> cancel_requested{false};
 };
 
 using detected_callback_t =

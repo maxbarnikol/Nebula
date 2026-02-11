@@ -48,6 +48,7 @@ struct worker_data {
 
   bool stream_detected = false;
   std::mutex detected_mutex;
+  std::atomic<bool> *cancel_requested = nullptr;
 
   enum class status_t {
     init,
@@ -149,6 +150,10 @@ void worker_thread(worker_data &data, int gpu_id, typename driver::seed_t seed,
     out.clear();
 
     for (;;) {
+      if (data.cancel_requested &&
+          data.cancel_requested->load(std::memory_order_relaxed)) {
+        break;
+      }
       d.push_to_simulation();
       d.buffer_detected();
       cudaDeviceSynchronize();
@@ -194,6 +199,10 @@ void worker_thread(worker_data &data, int gpu_id, typename driver::seed_t seed,
     std::vector<detected_electron> detected_batch;
 
     for (;;) {
+      if (data.cancel_requested &&
+          data.cancel_requested->load(std::memory_order_relaxed)) {
+        break;
+      }
       d.push_to_simulation();
       d.buffer_detected();
       cudaDeviceSynchronize();
@@ -311,6 +320,7 @@ bool run_simulation(const std::vector<triangle> &triangles,
   data.pixels = &pixels;
   data.running_count.resize(n_gpus, 0);
   data.detected.resize(n_gpus);
+  data.cancel_requested = progress ? &progress->cancel_requested : nullptr;
 
   data.tags.resize(primaries.size());
   std::iota(data.tags.begin(), data.tags.end(), 0);
@@ -358,10 +368,16 @@ bool run_simulation(const std::vector<triangle> &triangles,
                                         std::memory_order_relaxed);
     progress->running_particles.store(0, std::memory_order_relaxed);
     progress->progress.store(0.0, std::memory_order_relaxed);
+    progress->cancel_requested.store(false, std::memory_order_relaxed);
   }
 
+  bool cancelled = false;
   for (;;) {
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    if (progress && progress->cancel_requested.load(std::memory_order_relaxed)) {
+      cancelled = true;
+      break;
+    }
     const auto primaries_to_go = data.primaries.get_primaries_to_go();
 
     if (progress) {
@@ -422,11 +438,19 @@ bool run_simulation(const std::vector<triangle> &triangles,
   }
 
   if (progress) {
-    progress->primaries_remaining.store(0, std::memory_order_relaxed);
+    progress->primaries_remaining.store(
+        cancelled ? data.primaries.get_primaries_to_go() : 0,
+        std::memory_order_relaxed);
     progress->running_particles.store(0, std::memory_order_relaxed);
-    progress->progress.store(1.0, std::memory_order_relaxed);
+    if (!cancelled) {
+      progress->progress.store(1.0, std::memory_order_relaxed);
+    }
   }
 
+  if (cancelled) {
+    out_error = "Simulation cancelled.";
+    return false;
+  }
   return true;
 }
 
@@ -496,6 +520,7 @@ bool run_simulation_streaming(const std::vector<triangle> &triangles,
   data.running_count.resize(n_gpus, 0);
   data.detected.resize(n_gpus);
   data.stream_detected = true;
+  data.cancel_requested = progress ? &progress->cancel_requested : nullptr;
 
   data.tags.resize(primaries.size());
   std::iota(data.tags.begin(), data.tags.end(), 0);
@@ -543,6 +568,7 @@ bool run_simulation_streaming(const std::vector<triangle> &triangles,
                                         std::memory_order_relaxed);
     progress->running_particles.store(0, std::memory_order_relaxed);
     progress->progress.store(0.0, std::memory_order_relaxed);
+    progress->cancel_requested.store(false, std::memory_order_relaxed);
   }
 
   std::vector<std::vector<detected_electron>> flush_buffers;
@@ -565,8 +591,13 @@ bool run_simulation_streaming(const std::vector<triangle> &triangles,
     }
   };
 
+  bool cancelled = false;
   for (;;) {
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    if (progress && progress->cancel_requested.load(std::memory_order_relaxed)) {
+      cancelled = true;
+      break;
+    }
     const auto primaries_to_go = data.primaries.get_primaries_to_go();
 
     if (progress) {
@@ -622,11 +653,19 @@ bool run_simulation_streaming(const std::vector<triangle> &triangles,
   }
 
   if (progress) {
-    progress->primaries_remaining.store(0, std::memory_order_relaxed);
+    progress->primaries_remaining.store(
+        cancelled ? data.primaries.get_primaries_to_go() : 0,
+        std::memory_order_relaxed);
     progress->running_particles.store(0, std::memory_order_relaxed);
-    progress->progress.store(1.0, std::memory_order_relaxed);
+    if (!cancelled) {
+      progress->progress.store(1.0, std::memory_order_relaxed);
+    }
   }
 
+  if (cancelled) {
+    out_error = "Simulation cancelled.";
+    return false;
+  }
   return true;
 }
 
