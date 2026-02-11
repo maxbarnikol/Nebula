@@ -49,6 +49,7 @@ struct worker_data {
   bool stream_detected = false;
   std::mutex detected_mutex;
   std::atomic<bool> *cancel_requested = nullptr;
+  std::atomic<bool> startup_cancelled{false};
 
   enum class status_t {
     init,
@@ -64,19 +65,52 @@ void worker_thread(worker_data &data, int gpu_id, typename driver::seed_t seed,
                    bool do_prescan) {
   cudaSetDevice(gpu_id);
 
-  {
+  auto cancellation_requested = [&data]() {
+    return data.startup_cancelled.load(std::memory_order_relaxed) ||
+           (data.cancel_requested &&
+            data.cancel_requested->load(std::memory_order_relaxed));
+  };
+
+  auto signal_startup_cancelled = [&data, gpu_id]() {
+    data.startup_cancelled.store(true, std::memory_order_relaxed);
+    {
+      std::lock_guard<std::mutex> lg(data.cv_m);
+      if (data.status < worker_data::status_t::prescan_done) {
+        data.status = worker_data::status_t::prescan_done;
+      }
+    }
+    data.cv.notify_all();
+    {
+      std::lock_guard<std::mutex> lock(data.running_mutex);
+      data.running_count[gpu_id] = 0;
+    }
+  };
+
+  auto wait_until = [&data](auto &&predicate) {
     std::unique_lock<std::mutex> lk(data.cv_m);
-    data.cv.wait(lk, [&data]() {
-      return data.status >= worker_data::status_t::geometry_loaded;
-    });
+    while (!predicate()) {
+      data.cv.wait_for(lk, std::chrono::milliseconds(25));
+    }
+  };
+
+  wait_until([&data, &cancellation_requested]() {
+    return data.status >= worker_data::status_t::geometry_loaded ||
+           cancellation_requested();
+  });
+  if (cancellation_requested()) {
+    signal_startup_cancelled();
+    return;
   }
   geometry_t geometry = geometry_t::create(data.geometry);
 
-  {
-    std::unique_lock<std::mutex> lk(data.cv_m);
-    data.cv.wait(lk, [&data]() {
-      return data.status >= worker_data::status_t::materials_loaded;
-    });
+  wait_until([&data, &cancellation_requested]() {
+    return data.status >= worker_data::status_t::materials_loaded ||
+           cancellation_requested();
+  });
+  if (cancellation_requested()) {
+    geometry_t::destroy(geometry);
+    signal_startup_cancelled();
+    return;
   }
   auto materials = nbl::gpu_material_manager<gpu_material_t>::create(*data.materials);
 
@@ -85,11 +119,15 @@ void worker_thread(worker_data &data, int gpu_id, typename driver::seed_t seed,
            data.max_energy, seed);
 
   if (do_prescan) {
-    {
-      std::unique_lock<std::mutex> lk(data.cv_m);
-      data.cv.wait(lk, [&data]() {
-        return data.status >= worker_data::status_t::primaries_loaded;
-      });
+    wait_until([&data, &cancellation_requested]() {
+      return data.status >= worker_data::status_t::primaries_loaded ||
+             cancellation_requested();
+    });
+    if (cancellation_requested()) {
+      nbl::gpu_material_manager<gpu_material_t>::destroy(materials);
+      geometry_t::destroy(geometry);
+      signal_startup_cancelled();
+      return;
     }
 
     std::vector<std::pair<uint32_t, uint32_t>> prescan_stats;
@@ -102,12 +140,10 @@ void worker_thread(worker_data &data, int gpu_id, typename driver::seed_t seed,
     }
 
     while (prescan_stats.back().first > 0) {
-      if (data.cancel_requested &&
-          data.cancel_requested->load(std::memory_order_relaxed)) {
-        {
-          std::lock_guard<std::mutex> lock(data.running_mutex);
-          data.running_count[gpu_id] = 0;
-        }
+      if (cancellation_requested()) {
+        nbl::gpu_material_manager<gpu_material_t>::destroy(materials);
+        geometry_t::destroy(geometry);
+        signal_startup_cancelled();
         return;
       }
       d.do_iteration();
@@ -144,10 +180,23 @@ void worker_thread(worker_data &data, int gpu_id, typename driver::seed_t seed,
     }
     data.cv.notify_all();
   } else {
-    std::unique_lock<std::mutex> lk(data.cv_m);
-    data.cv.wait(lk, [&data]() {
-      return data.status >= worker_data::status_t::prescan_done;
+    wait_until([&data, &cancellation_requested]() {
+      return data.status >= worker_data::status_t::prescan_done ||
+             cancellation_requested();
     });
+    if (cancellation_requested()) {
+      nbl::gpu_material_manager<gpu_material_t>::destroy(materials);
+      geometry_t::destroy(geometry);
+      signal_startup_cancelled();
+      return;
+    }
+  }
+
+  if (cancellation_requested()) {
+    nbl::gpu_material_manager<gpu_material_t>::destroy(materials);
+    geometry_t::destroy(geometry);
+    signal_startup_cancelled();
+    return;
   }
 
   d.allocate_input_buffers(data.batch_size);
@@ -342,6 +391,10 @@ bool run_simulation(const std::vector<triangle> &triangles,
     out_error = "No CUDA devices found.";
     return false;
   }
+  if (progress && progress->cancel_requested.load(std::memory_order_relaxed)) {
+    out_error = "Simulation cancelled.";
+    return false;
+  }
 
   if (settings.sort_primaries) {
     nbl::sort_pri_file(primaries, pixels);
@@ -393,11 +446,32 @@ bool run_simulation(const std::vector<triangle> &triangles,
                          i == 0);
   }
 
+  auto signal_startup_cancelled = [&data]() {
+    data.startup_cancelled.store(true, std::memory_order_relaxed);
+    {
+      std::lock_guard<std::mutex> lg(data.cv_m);
+      if (data.status < worker_data::status_t::prescan_done) {
+        data.status = worker_data::status_t::prescan_done;
+      }
+    }
+    data.cv.notify_all();
+  };
+
   {
     std::unique_lock<std::mutex> lk(data.cv_m);
-    data.cv.wait(lk, [&data]() {
-      return data.status >= worker_data::status_t::prescan_done;
-    });
+    while (data.status < worker_data::status_t::prescan_done &&
+           !data.startup_cancelled.load(std::memory_order_relaxed) &&
+           !(progress &&
+             progress->cancel_requested.load(std::memory_order_relaxed))) {
+      data.cv.wait_for(lk, std::chrono::milliseconds(25));
+    }
+  }
+
+  bool cancelled =
+      data.startup_cancelled.load(std::memory_order_relaxed) ||
+      (progress && progress->cancel_requested.load(std::memory_order_relaxed));
+  if (cancelled) {
+    signal_startup_cancelled();
   }
 
   const std::size_t total_primaries = primaries.size();
@@ -405,52 +479,55 @@ bool run_simulation(const std::vector<triangle> &triangles,
     progress->primaries_remaining.store(total_primaries,
                                         std::memory_order_relaxed);
     progress->running_particles.store(0, std::memory_order_relaxed);
-    progress->progress.store(0.0, std::memory_order_relaxed);
-    progress->cancel_requested.store(false, std::memory_order_relaxed);
+    if (!cancelled) {
+      progress->progress.store(0.0, std::memory_order_relaxed);
+    }
   }
 
-  bool cancelled = false;
-  for (;;) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(25));
-    if (progress && progress->cancel_requested.load(std::memory_order_relaxed)) {
-      cancelled = true;
-      break;
-    }
-    const auto primaries_to_go = data.primaries.get_primaries_to_go();
-
-    if (progress) {
-      double ratio = 1.0;
-      if (total_primaries > 0) {
-        ratio = 1.0 - (static_cast<double>(primaries_to_go) /
-                       static_cast<double>(total_primaries));
+  if (!cancelled) {
+    for (;;) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+      if (progress && progress->cancel_requested.load(std::memory_order_relaxed)) {
+        cancelled = true;
+        signal_startup_cancelled();
+        break;
       }
-      progress->primaries_remaining.store(primaries_to_go,
-                                          std::memory_order_relaxed);
-      progress->progress.store(ratio, std::memory_order_relaxed);
+      const auto primaries_to_go = data.primaries.get_primaries_to_go();
 
-      uint32_t running = 0;
-      {
-        std::lock_guard<std::mutex> lock(data.running_mutex);
-        for (const auto &count : data.running_count) {
-          running += count;
+      if (progress) {
+        double ratio = 1.0;
+        if (total_primaries > 0) {
+          ratio = 1.0 - (static_cast<double>(primaries_to_go) /
+                         static_cast<double>(total_primaries));
         }
-      }
-      progress->running_particles.store(running, std::memory_order_relaxed);
-    }
+        progress->primaries_remaining.store(primaries_to_go,
+                                            std::memory_order_relaxed);
+        progress->progress.store(ratio, std::memory_order_relaxed);
 
-    if (primaries_to_go == 0) {
-      bool any_running = false;
-      {
-        std::lock_guard<std::mutex> lock(data.running_mutex);
-        for (const auto &count : data.running_count) {
-          if (count != 0) {
-            any_running = true;
-            break;
+        uint32_t running = 0;
+        {
+          std::lock_guard<std::mutex> lock(data.running_mutex);
+          for (const auto &count : data.running_count) {
+            running += count;
           }
         }
+        progress->running_particles.store(running, std::memory_order_relaxed);
       }
-      if (!any_running) {
-        break;
+
+      if (primaries_to_go == 0) {
+        bool any_running = false;
+        {
+          std::lock_guard<std::mutex> lock(data.running_mutex);
+          for (const auto &count : data.running_count) {
+            if (count != 0) {
+              any_running = true;
+              break;
+            }
+          }
+        }
+        if (!any_running) {
+          break;
+        }
       }
     }
   }
@@ -541,6 +618,10 @@ bool run_simulation_streaming(const std::vector<triangle> &triangles,
     out_error = "No CUDA devices found.";
     return false;
   }
+  if (progress && progress->cancel_requested.load(std::memory_order_relaxed)) {
+    out_error = "Simulation cancelled.";
+    return false;
+  }
 
   if (settings.sort_primaries) {
     nbl::sort_pri_file(primaries, pixels);
@@ -593,11 +674,32 @@ bool run_simulation_streaming(const std::vector<triangle> &triangles,
                          i == 0);
   }
 
+  auto signal_startup_cancelled = [&data]() {
+    data.startup_cancelled.store(true, std::memory_order_relaxed);
+    {
+      std::lock_guard<std::mutex> lg(data.cv_m);
+      if (data.status < worker_data::status_t::prescan_done) {
+        data.status = worker_data::status_t::prescan_done;
+      }
+    }
+    data.cv.notify_all();
+  };
+
   {
     std::unique_lock<std::mutex> lk(data.cv_m);
-    data.cv.wait(lk, [&data]() {
-      return data.status >= worker_data::status_t::prescan_done;
-    });
+    while (data.status < worker_data::status_t::prescan_done &&
+           !data.startup_cancelled.load(std::memory_order_relaxed) &&
+           !(progress &&
+             progress->cancel_requested.load(std::memory_order_relaxed))) {
+      data.cv.wait_for(lk, std::chrono::milliseconds(25));
+    }
+  }
+
+  bool cancelled =
+      data.startup_cancelled.load(std::memory_order_relaxed) ||
+      (progress && progress->cancel_requested.load(std::memory_order_relaxed));
+  if (cancelled) {
+    signal_startup_cancelled();
   }
 
   const std::size_t total_primaries = primaries.size();
@@ -605,8 +707,9 @@ bool run_simulation_streaming(const std::vector<triangle> &triangles,
     progress->primaries_remaining.store(total_primaries,
                                         std::memory_order_relaxed);
     progress->running_particles.store(0, std::memory_order_relaxed);
-    progress->progress.store(0.0, std::memory_order_relaxed);
-    progress->cancel_requested.store(false, std::memory_order_relaxed);
+    if (!cancelled) {
+      progress->progress.store(0.0, std::memory_order_relaxed);
+    }
   }
 
   std::vector<std::vector<detected_electron>> flush_buffers;
@@ -629,50 +732,52 @@ bool run_simulation_streaming(const std::vector<triangle> &triangles,
     }
   };
 
-  bool cancelled = false;
-  for (;;) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(25));
-    if (progress && progress->cancel_requested.load(std::memory_order_relaxed)) {
-      cancelled = true;
-      break;
-    }
-    const auto primaries_to_go = data.primaries.get_primaries_to_go();
-
-    if (progress) {
-      double ratio = 1.0;
-      if (total_primaries > 0) {
-        ratio = 1.0 - (static_cast<double>(primaries_to_go) /
-                       static_cast<double>(total_primaries));
+  if (!cancelled) {
+    for (;;) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+      if (progress && progress->cancel_requested.load(std::memory_order_relaxed)) {
+        cancelled = true;
+        signal_startup_cancelled();
+        break;
       }
-      progress->primaries_remaining.store(primaries_to_go,
-                                          std::memory_order_relaxed);
-      progress->progress.store(ratio, std::memory_order_relaxed);
+      const auto primaries_to_go = data.primaries.get_primaries_to_go();
 
-      uint32_t running = 0;
-      {
-        std::lock_guard<std::mutex> lock(data.running_mutex);
-        for (const auto &count : data.running_count) {
-          running += count;
+      if (progress) {
+        double ratio = 1.0;
+        if (total_primaries > 0) {
+          ratio = 1.0 - (static_cast<double>(primaries_to_go) /
+                         static_cast<double>(total_primaries));
         }
-      }
-      progress->running_particles.store(running, std::memory_order_relaxed);
-    }
+        progress->primaries_remaining.store(primaries_to_go,
+                                            std::memory_order_relaxed);
+        progress->progress.store(ratio, std::memory_order_relaxed);
 
-    flush_detected();
-
-    if (primaries_to_go == 0) {
-      bool any_running = false;
-      {
-        std::lock_guard<std::mutex> lock(data.running_mutex);
-        for (const auto &count : data.running_count) {
-          if (count != 0) {
-            any_running = true;
-            break;
+        uint32_t running = 0;
+        {
+          std::lock_guard<std::mutex> lock(data.running_mutex);
+          for (const auto &count : data.running_count) {
+            running += count;
           }
         }
+        progress->running_particles.store(running, std::memory_order_relaxed);
       }
-      if (!any_running) {
-        break;
+
+      flush_detected();
+
+      if (primaries_to_go == 0) {
+        bool any_running = false;
+        {
+          std::lock_guard<std::mutex> lock(data.running_mutex);
+          for (const auto &count : data.running_count) {
+            if (count != 0) {
+              any_running = true;
+              break;
+            }
+          }
+        }
+        if (!any_running) {
+          break;
+        }
       }
     }
   }

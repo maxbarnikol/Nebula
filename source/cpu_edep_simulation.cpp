@@ -148,7 +148,6 @@ void ResetProgress(simulation_progress *progress) {
   progress->primaries_remaining.store(0, std::memory_order_relaxed);
   progress->running_particles.store(0, std::memory_order_relaxed);
   progress->progress.store(0.0, std::memory_order_relaxed);
-  progress->cancel_requested.store(false, std::memory_order_relaxed);
 }
 
 void FinishProgress(simulation_progress *progress) {
@@ -177,6 +176,10 @@ bool run_simulation_streaming(
   }
 
   ResetProgress(progress);
+  if (progress && progress->cancel_requested.load(std::memory_order_relaxed)) {
+    out_error = "Simulation cancelled.";
+    return false;
+  }
 
   if (triangles.empty()) {
     out_error = "No triangles provided.";
