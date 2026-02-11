@@ -25,13 +25,22 @@ public:
   using particle_index_t = typename base_driver_t::particle_index_t;
 
   template <typename emit_fn>
-  void simulate_to_end(const std::vector<int2> &pixels,
+  bool simulate_to_end(const std::vector<int2> &pixels,
                        bool emit_interface_events,
                        bool emit_secondary_spawn_events,
-                       bool emit_energy_deposit_events, emit_fn &&emit) {
+                       bool emit_energy_deposit_events, emit_fn &&emit,
+                       const std::atomic<bool> *cancel_requested = nullptr) {
     for (particle_index_t particle_idx = 0;
          particle_idx < this->_particles.get_total_count(); ++particle_idx) {
+      if (cancel_requested &&
+          cancel_requested->load(std::memory_order_relaxed)) {
+        return true;
+      }
       while (this->_particles.active(particle_idx)) {
+        if (cancel_requested &&
+            cancel_requested->load(std::memory_order_relaxed)) {
+          return true;
+        }
         const auto primary_tag = this->_particles.get_primary_tag(particle_idx);
         const auto electron_tag =
             this->_particles.get_secondary_tag(particle_idx);
@@ -128,6 +137,7 @@ public:
         }
       }
     }
+    return false;
   }
 };
 
@@ -289,9 +299,15 @@ bool run_simulation_streaming(
       }
     }
 
-    driver.simulate_to_end(pixels, settings.emit_interface_events,
-                           settings.emit_secondary_spawn_events,
-                           settings.emit_energy_deposit_events, emit);
+    const bool cancelledDuringBatch = driver.simulate_to_end(
+        pixels, settings.emit_interface_events,
+        settings.emit_secondary_spawn_events,
+        settings.emit_energy_deposit_events, emit,
+        progress ? &progress->cancel_requested : nullptr);
+    if (cancelledDuringBatch) {
+      cancelled = true;
+      break;
+    }
 
     driver.flush_detected([](particle const &, std::uint32_t) {});
 

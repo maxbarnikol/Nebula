@@ -102,6 +102,14 @@ void worker_thread(worker_data &data, int gpu_id, typename driver::seed_t seed,
     }
 
     while (prescan_stats.back().first > 0) {
+      if (data.cancel_requested &&
+          data.cancel_requested->load(std::memory_order_relaxed)) {
+        {
+          std::lock_guard<std::mutex> lock(data.running_mutex);
+          data.running_count[gpu_id] = 0;
+        }
+        return;
+      }
       d.do_iteration();
       prescan_stats.push_back({d.get_running_count(), d.get_detected_count()});
     }
@@ -149,9 +157,11 @@ void worker_thread(worker_data &data, int gpu_id, typename driver::seed_t seed,
     std::vector<detected_electron> &out = data.detected[gpu_id];
     out.clear();
 
+    bool cancelled = false;
     for (;;) {
       if (data.cancel_requested &&
           data.cancel_requested->load(std::memory_order_relaxed)) {
+        cancelled = true;
         break;
       }
       d.push_to_simulation();
@@ -159,7 +169,16 @@ void worker_thread(worker_data &data, int gpu_id, typename driver::seed_t seed,
       cudaDeviceSynchronize();
 
       for (uint32_t i = 0; i < data.frame_size; ++i) {
+        if (data.cancel_requested &&
+            data.cancel_requested->load(std::memory_order_relaxed)) {
+          cancelled = true;
+          break;
+        }
         d.do_iteration();
+      }
+      if (cancelled) {
+        cudaDeviceSynchronize();
+        break;
       }
 
       d.push_to_buffer(data.primaries);
@@ -190,6 +209,10 @@ void worker_thread(worker_data &data, int gpu_id, typename driver::seed_t seed,
         break;
       }
     }
+    if (cancelled) {
+      std::lock_guard<std::mutex> lock(data.running_mutex);
+      data.running_count[gpu_id] = 0;
+    }
   } else {
     {
       std::lock_guard<std::mutex> lock(data.detected_mutex);
@@ -198,9 +221,11 @@ void worker_thread(worker_data &data, int gpu_id, typename driver::seed_t seed,
 
     std::vector<detected_electron> detected_batch;
 
+    bool cancelled = false;
     for (;;) {
       if (data.cancel_requested &&
           data.cancel_requested->load(std::memory_order_relaxed)) {
+        cancelled = true;
         break;
       }
       d.push_to_simulation();
@@ -208,7 +233,16 @@ void worker_thread(worker_data &data, int gpu_id, typename driver::seed_t seed,
       cudaDeviceSynchronize();
 
       for (uint32_t i = 0; i < data.frame_size; ++i) {
+        if (data.cancel_requested &&
+            data.cancel_requested->load(std::memory_order_relaxed)) {
+          cancelled = true;
+          break;
+        }
         d.do_iteration();
+      }
+      if (cancelled) {
+        cudaDeviceSynchronize();
+        break;
       }
 
       d.push_to_buffer(data.primaries);
@@ -246,6 +280,10 @@ void worker_thread(worker_data &data, int gpu_id, typename driver::seed_t seed,
       if (running_count == 0 && data.primaries.done()) {
         break;
       }
+    }
+    if (cancelled) {
+      std::lock_guard<std::mutex> lock(data.running_mutex);
+      data.running_count[gpu_id] = 0;
     }
   }
 
@@ -373,7 +411,7 @@ bool run_simulation(const std::vector<triangle> &triangles,
 
   bool cancelled = false;
   for (;;) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
     if (progress && progress->cancel_requested.load(std::memory_order_relaxed)) {
       cancelled = true;
       break;
@@ -593,7 +631,7 @@ bool run_simulation_streaming(const std::vector<triangle> &triangles,
 
   bool cancelled = false;
   for (;;) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
     if (progress && progress->cancel_requested.load(std::memory_order_relaxed)) {
       cancelled = true;
       break;
