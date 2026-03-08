@@ -36,6 +36,9 @@ find_package(HDF5 1.8.13 REQUIRED C HL)
 include_directories(${HDF5_INCLUDE_DIRS})
 add_definitions(${HDF5_DEFINITIONS})
 list(APPEND LIBRARIES ${HDF5_LIBRARIES} ${HDF5_HL_LIBRARIES})
+if(WIN32)
+	list(APPEND LIBRARIES Shlwapi)
+endif()
 
 # Find MPI library if compiling against parallel HDF5
 if(HDF5_IS_PARALLEL)
@@ -56,5 +59,9 @@ endif()
 
 string(APPEND CMAKE_CUDA_FLAGS " --expt-relaxed-constexpr")
 string(APPEND CMAKE_CUDA_FLAGS " -prec-sqrt=false")
+if(WIN32)
+	string(APPEND CMAKE_CUDA_FLAGS " -allow-unsupported-compiler")
+	string(APPEND CMAKE_CUDA_FLAGS " -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH")
+endif()
 
 add_subdirectory(source)
