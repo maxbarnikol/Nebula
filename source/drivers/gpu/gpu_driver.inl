@@ -209,6 +209,11 @@ CPU void gpu_driver<scatter_list_t, intersect_t, geometry_manager_t>::allocate_i
 	cudaMallocHost(&buffer_hin_tags, N*sizeof(uint32_t));
 
 	kernels::init_buffer_data<<<_num_blocks, _threads_per_block>>>(buffer_din_data, N);
+	// Sync required: push_to_buffer() reads buffer_din_data via buffer_stream
+	// (non-blocking), which does not implicitly wait for the default stream.
+	// Without this, the read can race with init_buffer_data, causing primaries
+	// in the first batch to be silently lost.
+	cudaDeviceSynchronize();
 }
 
 template<typename scatter_list_t,
